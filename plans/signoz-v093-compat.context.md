@@ -13,6 +13,8 @@ Fork the MCP server to the user's GitHub, adapt it to the existing SigNoz v0.93.
 - Trace search/detail, metric catalog, top metrics, gauge/sum/histogram queries, and legacy dashboard and alert reads passed live read-only verification.
 - SigNoz v0.93 rejects percentile queries with explicit temporality; the backend resolves temporality when omitted. Retry only that specific validation failure and disclose the fallback.
 - Legacy dashboard schemas differ from v2. Mutating v2 dashboard and alert contracts are not translated or verified against the legacy instance.
+- Legacy alert history supports offset pagination; use explicit v1-backed cursors and reject unsupported filter expressions.
+- The old metric metadata endpoint cannot reliably answer time-bounded cardinality or complete dependency queries; those operations remain explicitly unsupported rather than returning misleading empty results.
 
 ## Open questions
 - [ ] Which administrative mutation and optional integration APIs are supported by the deployed instance?
