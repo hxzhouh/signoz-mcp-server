@@ -3,12 +3,14 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	clientpkg "github.com/SigNoz/signoz-mcp-server/internal/client"
 	logpkg "github.com/SigNoz/signoz-mcp-server/pkg/log"
 	"github.com/SigNoz/signoz-mcp-server/pkg/metricsrules"
 	"github.com/SigNoz/signoz-mcp-server/pkg/types"
@@ -157,7 +159,7 @@ func (h *Handler) handleQueryMetrics(ctx context.Context, req mcp.CallToolReques
 
 	// Formula sub-queries
 	for _, fq := range mqr.FormulaQueries {
-		subResolved, subErr := resolveFormulaSubQuery(ctx, h, client, fq, mqr.RequestType, mqr.Source, &decisions)
+		subResolved, subErr := resolveFormulaSubQuery(ctx, h, client, &fq, mqr.RequestType, mqr.Source, &decisions)
 		if subErr != nil {
 			// Upstream metadata-fetch failures get the uniform prefix; local
 			// validation errors ("metric not found"/"validation error") stay raw.
@@ -211,6 +213,25 @@ func (h *Handler) handleQueryMetrics(ctx context.Context, req mcp.CallToolReques
 	h.logger.DebugContext(ctx, "Executing metrics query", slog.String("payload", logpkg.TruncBody(queryJSON)))
 
 	result, err := client.QueryBuilderV5(ctx, queryJSON)
+	var statusErr *clientpkg.HTTPStatusError
+	if errors.As(err, &statusErr) && statusErr.StatusCode == 400 && strings.Contains(statusErr.Body, "percentile aggregation can only be used with histogram or summary metric types") {
+		changed := false
+		for i := range querySpecs {
+			agg := &querySpecs[i].Aggregation
+			if strings.HasPrefix(agg.SpaceAggregation, "p") && agg.Temporality != "" {
+				agg.Temporality = ""
+				changed = true
+			}
+		}
+		if changed {
+			queryJSON, err = types.BuildMetricsQueryPayloadJSON(startTime, endTime, stepInterval, querySpecs, mqr.RequestType, mqr.Source)
+			if err == nil {
+				h.logger.WarnContext(ctx, "retrying percentile query without temporality for legacy SigNoz validation")
+				result, err = client.QueryBuilderV5(ctx, queryJSON)
+				decisions = append(decisions, "legacy compatibility: temporality omitted from percentile query; backend determines temporality and may use an unspecified fallback")
+			}
+		}
+	}
 	if err != nil {
 		h.logQueryFailure(ctx, "Metrics query failed", err)
 		return upstreamQueryError(err, "metrics"), nil
@@ -371,7 +392,7 @@ func normalizeMetricType(t string) string {
 // resolveFormulaSubQuery applies defaults for a formula sub-query, auto-fetching metadata if needed.
 func resolveFormulaSubQuery(ctx context.Context, h *Handler, client interface {
 	ListMetrics(ctx context.Context, start, end int64, limit int, searchText, source string) (json.RawMessage, error)
-}, fq formulaSubQuery, requestType, source string, decisions *[]string) (*metricsrules.ResolvedAggregation, error) {
+}, fq *formulaSubQuery, requestType, source string, decisions *[]string) (*metricsrules.ResolvedAggregation, error) {
 	metricType := fq.MetricType
 	isMonotonic := fq.IsMonotonic
 	temporality := fq.Temporality
@@ -415,6 +436,7 @@ func resolveFormulaSubQuery(ctx context.Context, h *Handler, client interface {
 
 	// Update fq temporality for the aggregation struct
 	fq.Temporality = temporality
+	fq.MetricType = metricType
 
 	for _, d := range resolved.Decisions {
 		*decisions = append(*decisions, fmt.Sprintf("query %s: %s", fq.Name, d))

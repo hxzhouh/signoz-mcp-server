@@ -1214,6 +1214,10 @@ func TestQueryBuilderV5(t *testing.T) {
 func TestGetTraceDetails_UsesCanonicalTraceIDFilter(t *testing.T) {
 	var captured []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/fields/keys" {
+			_, _ = w.Write([]byte(`{"status":"success","data":{"keys":{},"complete":true}}`))
+			return
+		}
 		assert.Equal(t, http.MethodPost, r.Method)
 		assert.Equal(t, "/api/v5/query_range", r.URL.Path)
 		body, err := io.ReadAll(r.Body)

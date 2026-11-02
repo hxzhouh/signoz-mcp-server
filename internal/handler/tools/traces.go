@@ -10,6 +10,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	clientpkg "github.com/SigNoz/signoz-mcp-server/internal/client"
 	logpkg "github.com/SigNoz/signoz-mcp-server/pkg/log"
 	"github.com/SigNoz/signoz-mcp-server/pkg/timeutil"
 	"github.com/SigNoz/signoz-mcp-server/pkg/types"
@@ -135,6 +136,13 @@ func (h *Handler) handleSearchTraces(ctx context.Context, req mcp.CallToolReques
 	}
 
 	queryPayload := types.BuildTracesQueryPayload(reqData.StartTime, reqData.EndTime, reqData.FilterExpression, reqData.Limit, reqData.Offset)
+	client, err := h.GetClient(ctx)
+	if err != nil {
+		return clientError(err), nil
+	}
+	if err := clientpkg.PrepareTraceFields(ctx, client, queryPayload, h.logger); err != nil {
+		return upstreamError(err), nil
+	}
 
 	queryJSON, err := json.Marshal(queryPayload)
 	if err != nil {
@@ -145,10 +153,6 @@ func (h *Handler) handleSearchTraces(ctx context.Context, req mcp.CallToolReques
 	h.logger.DebugContext(ctx, "Tool called: signoz_search_traces",
 		slog.String("filter", reqData.FilterExpression))
 
-	client, err := h.GetClient(ctx)
-	if err != nil {
-		return clientError(err), nil
-	}
 	result, err := client.QueryBuilderV5(ctx, queryJSON)
 	if err != nil {
 		h.logQueryFailure(ctx, "Failed to search traces", err)

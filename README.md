@@ -8,6 +8,14 @@ A Model Context Protocol (MCP) server that provides seamless access to SigNoz ob
 
 **[📖 Full Documentation](https://signoz.io/docs/ai/signoz-mcp-server/)**
 
+## SigNoz v0.93 compatibility fork
+
+This fork is based on MCP server v0.10.0 and supports a SigNoz v0.93 deployment's read workflows. Trace search and details discover optional attributes before selecting them. Metrics catalog and ingestion ranking fall back to v1 endpoints, and legacy percentile validation retries without a temporality value when the backend rejects it; the response notes that the backend may use an unspecified fallback. Legacy alert rules and dashboard list/detail have read-only fallbacks.
+
+Legacy dashboard definitions have a different format from v2 Perses dashboards. Dashboard filter/sort options and v2 dashboard or alert mutation contracts are not converted to v1. Unsupported HTML responses are returned as errors rather than reported as successful operations. Validate write operations in an isolated instance before relying on them. Other deployments and all possible API operations have not been exhaustively verified.
+
+Build locally with `go build -o signoz-mcp-server ./cmd/server`. Configure the resulting binary as your stdio MCP command and set the existing `SIGNOZ_URL` and `SIGNOZ_API_KEY` through your client configuration; never commit credentials. Restart the client after changing its MCP binary.
+
 ## Table of Contents
 
 - [Connect to SigNoz Cloud](#connect-to-signoz-cloud)

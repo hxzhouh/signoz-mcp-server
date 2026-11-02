@@ -14,6 +14,26 @@ import (
 	"github.com/SigNoz/signoz-mcp-server/pkg/types"
 )
 
+func TestHandleQueryMetricsRetriesLegacyPercentileValidation(t *testing.T) {
+	var payloads []string
+	mock := &client.MockClient{QueryBuilderV5Fn: func(ctx context.Context, body []byte) (json.RawMessage, error) {
+		payloads = append(payloads, string(body))
+		if len(payloads) == 1 {
+			return nil, &client.HTTPStatusError{StatusCode: 400, Body: "percentile aggregation can only be used with histogram or summary metric types"}
+		}
+		return json.RawMessage(`{"status":"success","data":{"results":[]}}`), nil
+	}}
+	h := newTestHandler(mock)
+	req := makeToolRequest("signoz_query_metrics", map[string]any{"metricName": "duration", "metricType": "histogram", "temporality": "cumulative"})
+	result, err := h.handleQueryMetrics(testCtx(), req)
+	if err != nil || result.IsError || len(payloads) != 2 {
+		t.Fatalf("result=%v err=%v calls=%d", result, err, len(payloads))
+	}
+	if !strings.Contains(payloads[0], `"temporality":"cumulative"`) || strings.Contains(payloads[1], `"temporality"`) {
+		t.Fatalf("temporality was not omitted on retry")
+	}
+}
+
 func TestHandleQueryMetrics_ExplicitStartEndOverrideTimeRange(t *testing.T) {
 	var captured []byte
 	mock := &client.MockClient{

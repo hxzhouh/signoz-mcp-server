@@ -43,6 +43,8 @@ const (
 
 var (
 	ErrUnauthorized = errors.New("signoz credentials rejected")
+	// ErrUnsupportedAPI indicates an API route returned the frontend HTML shell.
+	ErrUnsupportedAPI = errors.New("SigNoz API endpoint returned HTML instead of JSON")
 	// ErrInstanceNotFound means the URL resolves but no SigNoz API answers
 	// there — e.g. an expired/deactivated cloud workspace whose ingress serves
 	// an HTML 404 page. A live SigNoz API replies to the validation endpoints
@@ -469,6 +471,10 @@ func (s *SigNoz) doRequestWithReplayPolicy(ctx context.Context, method, reqURL s
 		}
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			prefix := strings.ToLower(strings.TrimSpace(string(respBody)))
+			if strings.HasPrefix(prefix, "<!doctype html") || strings.HasPrefix(prefix, "<html") {
+				return nil, ErrUnsupportedAPI
+			}
 			return respBody, nil
 		}
 
@@ -549,7 +555,11 @@ func (s *SigNoz) ListMetrics(ctx context.Context, start, end int64, limit int, s
 
 	reqURL := fmt.Sprintf("%s/api/v2/metrics?%s", s.baseURL, params.Encode())
 	s.logger.DebugContext(s.ensureTenantContext(ctx), "Listing metrics", slog.String("searchText", searchText))
-	return s.doRequest(ctx, http.MethodGet, reqURL, nil, DefaultQueryTimeout)
+	result, err := s.doRequest(ctx, http.MethodGet, reqURL, nil, DefaultQueryTimeout)
+	if !isMissingAPI(err) {
+		return result, err
+	}
+	return s.listMetricsV1(ctx, start, end, limit, searchText, source)
 }
 
 func (s *SigNoz) ListMetricKeys(ctx context.Context) (json.RawMessage, error) {
@@ -572,13 +582,25 @@ func (s *SigNoz) ListAlerts(ctx context.Context, params types.ListAlertsParams) 
 func (s *SigNoz) ListAlertRules(ctx context.Context) (json.RawMessage, error) {
 	reqURL := fmt.Sprintf("%s/api/v2/rules", s.baseURL)
 	s.logger.DebugContext(s.ensureTenantContext(ctx), "Fetching alert rules from SigNoz", slog.String("url", reqURL))
-	return s.doRequest(ctx, http.MethodGet, reqURL, nil, DefaultQueryTimeout)
+	result, err := s.doRequest(ctx, http.MethodGet, reqURL, nil, DefaultQueryTimeout)
+	if !isMissingAPI(err) {
+		return result, err
+	}
+	result, err = s.doRequest(ctx, http.MethodGet, s.baseURL+"/api/v1/rules", nil, DefaultQueryTimeout)
+	if err != nil {
+		return nil, err
+	}
+	return normalizeLegacyRules(result)
 }
 
 func (s *SigNoz) GetAlertByRuleID(ctx context.Context, ruleID string) (json.RawMessage, error) {
 	reqURL := fmt.Sprintf("%s/api/v2/rules/%s", s.baseURL, url.PathEscape(ruleID))
 	s.logger.DebugContext(s.ensureTenantContext(ctx), "Fetching alert rule details", slog.String("ruleID", ruleID))
-	return s.doRequest(ctx, http.MethodGet, reqURL, nil, DefaultQueryTimeout)
+	result, err := s.doRequest(ctx, http.MethodGet, reqURL, nil, DefaultQueryTimeout)
+	if !errors.Is(err, ErrUnsupportedAPI) {
+		return result, err
+	}
+	return s.doRequest(ctx, http.MethodGet, s.baseURL+"/api/v1/rules/"+url.PathEscape(ruleID), nil, DefaultQueryTimeout)
 }
 
 // ListDashboards returns the v2 dashboard list (GET /api/v2/dashboards). The v2
@@ -609,13 +631,28 @@ func (s *SigNoz) ListDashboards(ctx context.Context, limit, offset int, filter, 
 		reqURL += "?" + enc
 	}
 	s.logger.DebugContext(ctx, "Fetching dashboards from SigNoz (v2)")
-	return s.doRequest(ctx, http.MethodGet, reqURL, nil, DefaultQueryTimeout)
+	result, err := s.doRequest(ctx, http.MethodGet, reqURL, nil, DefaultQueryTimeout)
+	if !isMissingAPI(err) {
+		return result, err
+	}
+	if filter != "" || sort != "" || order != "" {
+		return nil, errors.New("legacy dashboard list does not support filter or sort; omit these options")
+	}
+	result, err = s.doRequest(ctx, http.MethodGet, s.baseURL+"/api/v1/dashboards", nil, DefaultQueryTimeout)
+	if err != nil {
+		return nil, err
+	}
+	return normalizeLegacyDashboards(result, limit, offset)
 }
 
 func (s *SigNoz) GetDashboard(ctx context.Context, uuid string) (json.RawMessage, error) {
 	reqURL := fmt.Sprintf("%s/api/v2/dashboards/%s", s.baseURL, url.PathEscape(uuid))
 	s.logger.DebugContext(s.ensureTenantContext(ctx), "Fetching dashboard details", slog.String("uuid", uuid))
-	return s.doRequest(ctx, http.MethodGet, reqURL, nil, DefaultQueryTimeout)
+	result, err := s.doRequest(ctx, http.MethodGet, reqURL, nil, DefaultQueryTimeout)
+	if !errors.Is(err, ErrUnsupportedAPI) {
+		return result, err
+	}
+	return s.doRequest(ctx, http.MethodGet, s.baseURL+"/api/v1/dashboards/"+url.PathEscape(uuid), nil, DefaultQueryTimeout)
 }
 
 func (s *SigNoz) ListServices(ctx context.Context, start, end string) (json.RawMessage, error) {
@@ -773,6 +810,9 @@ func (s *SigNoz) GetTraceDetails(ctx context.Context, traceID string, includeSpa
 	limit := 1000
 
 	queryPayload := types.BuildTracesQueryPayload(startTime, endTime, filterExpression, limit, 0)
+	if err := PrepareTraceFields(ctx, s, queryPayload, s.logger); err != nil {
+		return nil, err
+	}
 	queryJSON, err := json.Marshal(queryPayload)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal query payload: %w", err)
@@ -865,7 +905,19 @@ func (s *SigNoz) GetTopMetrics(ctx context.Context, start, end int64, limit int)
 	reqURL := fmt.Sprintf("%s/api/v2/metrics/treemap", s.baseURL)
 	s.logger.DebugContext(s.ensureTenantContext(ctx), "Fetching metrics treemap",
 		slog.Int("limit", limit))
-	return s.doReplaySafePost(ctx, reqURL, body, DefaultQueryTimeout)
+	result, err := s.doReplaySafePost(ctx, reqURL, body, DefaultQueryTimeout)
+	if !isMissingAPI(err) {
+		return result, err
+	}
+	legacy, err := json.Marshal(map[string]any{"start": start, "end": end, "limit": limit, "treemap": "samples", "filters": map[string]any{"op": "AND", "items": []any{}}})
+	if err != nil {
+		return nil, err
+	}
+	result, err = s.doReplaySafePost(ctx, s.baseURL+"/api/v1/metrics/treemap", legacy, DefaultQueryTimeout)
+	if err != nil {
+		return nil, err
+	}
+	return normalizeLegacyMetrics(result)
 }
 
 func (s *SigNoz) TestNotificationChannel(ctx context.Context, receiverJSON []byte) error {
